@@ -289,6 +289,13 @@ class ExampleTabWidget(QWidget):
             self.lbl_img._stop_video_playback()
         super().hideEvent(event)
 
+    def showEvent(self, event):
+        # [Fix] Restore media playback/display when tab becomes visible again
+        if self.example_images and 0 <= self.current_example_idx < len(self.example_images):
+            path = self.example_images[self.current_example_idx]
+            self.lbl_img.set_media(path)
+        super().showEvent(event)
+
     def change_example(self, delta):
         if not self.example_images: return
         
