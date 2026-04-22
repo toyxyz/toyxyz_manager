@@ -10,7 +10,9 @@ The toyxyz manager is a model, workflow, and prompt management tool designed to 
 
 ## Update
 
-2026/09/09 - Add thumbnail icon images. The size and on/off setting can be configured in the settings. Loading thumbnail icon images uses more memory and may take additional time to load.
+2026/04/22 - Acc cache match. If you move a model without using the “move” function and a cache path mismatch occurs, you can use this to automatically relocate the cache to match the model’s current location.
+
+2026/03/09 - Add thumbnail icon images. The size and on/off setting can be configured in the settings. Loading thumbnail icon images uses more memory and may take additional time to load.
 
 2026/03/08 - Example filtering and search functionality added. Gallery search functionality added. Model/workflow/prompt move functionality added. Cache structure improved (cache needs to be regenerated).
 
