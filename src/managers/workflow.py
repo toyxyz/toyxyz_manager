@@ -432,7 +432,7 @@ class WorkflowManagerWidget(BaseManagerWidget):
         target_dir = os.path.normpath(target_dir)
 
         # Ensure target is inside root
-        if os.path.commonpath([root_path, target_dir]) != root_path:
+        if not self._is_path_within(root_path, target_dir):
             QMessageBox.critical(self, "Error", "Cannot move files outside the selected root directory.")
             return
 

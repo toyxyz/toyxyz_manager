@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QSplitter, QPushButton, QInputDialog, QMessageBox, QTextEdit, QDialog, QDialogButtonBox, QFileDialog, QApplication
 )
 from PySide6.QtGui import QClipboard, QTextOption
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 
 from .base import BaseManagerWidget
 from .example import ExampleTabWidget
@@ -274,18 +274,14 @@ class PromptEditDialog(QDialog):
         layout.addWidget(QLabel("Positive Prompt:"))
         self.txt_positive = QTextEdit()
         self.txt_positive.setPlainText(positive)
-        self.txt_positive.setPlainText(positive)
         self.txt_positive.setStyleSheet("background-color: #f0fff0;") # Keeping inline for dynamic hint
-        layout.addWidget(self.txt_positive)
         layout.addWidget(self.txt_positive)
         
         # Negative
         layout.addWidget(QLabel("Negative Prompt:"))
         self.txt_negative = QTextEdit()
         self.txt_negative.setPlainText(negative)
-        self.txt_negative.setPlainText(negative)
         self.txt_negative.setStyleSheet("background-color: #fff0f0;") # Keeping inline for dynamic hint
-        layout.addWidget(self.txt_negative)
         layout.addWidget(self.txt_negative)
         
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -561,7 +557,7 @@ class PromptManagerWidget(BaseManagerWidget):
         target_dir = os.path.normpath(target_dir)
 
         # Ensure target is inside root
-        if os.path.commonpath([root_path, target_dir]) != root_path:
+        if not self._is_path_within(root_path, target_dir):
             QMessageBox.critical(self, "Error", "Cannot move files outside the selected root directory.")
             return
 
@@ -1012,10 +1008,9 @@ class PromptManagerWidget(BaseManagerWidget):
                 item.setSizeHint(widget.sizeHint())
                 self.prompt_list.setItemWidget(item, widget)
 
+            QTimer.singleShot(0, self._adjust_list_items)
 
 
-    def eventFilter(self, obj, event):
-        return super().eventFilter(obj, event)
 
     def _on_copy_requested(self, text, ptype):
         if text:

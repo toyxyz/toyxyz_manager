@@ -143,6 +143,26 @@ class BaseManagerWidget(QWidget):
         fmt = '%Y-%m-%d %H:%M:%S' if seconds else '%Y-%m-%d %H:%M'
         return time.strftime(fmt, time.localtime(mtime))
 
+    @staticmethod
+    def _is_path_within(parent_path, child_path):
+        """Return True when child_path is inside parent_path, handling Windows drive mismatches."""
+        try:
+            parent = os.path.normcase(os.path.abspath(os.path.normpath(parent_path)))
+            child = os.path.normcase(os.path.abspath(os.path.normpath(child_path)))
+            return os.path.commonpath([parent, child]) == parent
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _is_associated_sibling(filename, base_name):
+        """Match normal sidecars and compound preview names like '<base>.preview.png'."""
+        if os.path.splitext(filename)[0] == base_name:
+            return True
+
+        filename_lower = filename.lower()
+        base_lower = base_name.lower()
+        return any(filename_lower == f"{base_lower}{ext.lower()}" for ext in PREVIEW_EXTENSIONS)
+
     def save_note_for_path(self, path, text, silent=False):
         if not path: return
         try:
@@ -954,8 +974,7 @@ class BaseManagerWidget(QWidget):
                 f_path = os.path.join(dir_path, f)
                 if not os.path.isfile(f_path): continue
                 
-                f_base = os.path.splitext(f)[0]
-                if f_base == base_name:
+                if self._is_associated_sibling(f, base_name):
                     try:
                         os.remove(f_path)
                         deleted_items.append(f"File: {f}")
@@ -1078,7 +1097,7 @@ class BaseManagerWidget(QWidget):
 
         # Ensure we are not moving a folder into itself
         if os.path.isdir(file_path):
-            if os.path.commonpath([file_path, target_dir]) == file_path:
+            if self._is_path_within(file_path, target_dir):
                 return False, 0, ["Cannot move a folder into itself."]
 
         filename = os.path.basename(file_path)

@@ -768,7 +768,7 @@ class MetadataWorker(QThread):
 
     def _wait_for_user(self):
         self._wait_mutex.lock()
-        self._wait_condition.wait(self._wait_mutex, 30000)
+        self._wait_condition.wait(self._wait_mutex)
         self._wait_mutex.unlock()
 
     def run(self):
@@ -794,10 +794,13 @@ class MetadataWorker(QThread):
                     if global_overwrite == 'no_all': should_skip = True
                     elif global_overwrite == 'yes_all': should_skip = False
                     else:
+                        self._overwrite_decision = None
                         self.ask_overwrite.emit(filename)
                         self._wait_for_user() 
+                        if not self._is_running:
+                            break
                         resp = self._overwrite_decision
-                        if resp == 'no': should_skip = True
+                        if resp in ('no', None): should_skip = True
                         elif resp == 'no_all':
                             global_overwrite = 'no_all'; should_skip = True
                         elif resp == 'yes_all':
@@ -1022,6 +1025,250 @@ class MetadataWorker(QThread):
                 futures = list(not_done)
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+
+# ==========================================
+# Cache Match Worker
+# ==========================================
+class CacheMatchWorker(QThread):
+    progress = Signal(str, str, int)  # path, status, percent
+    completed = Signal(dict)
+
+    def __init__(self, targets, cache_root, directories, mode="model"):
+        super().__init__()
+        self.setObjectName("CacheMatchWorker")
+        self.targets = targets or []
+        self.cache_root = cache_root or CACHE_DIR_NAME
+        self.directories = directories.copy() if directories else {}
+        self.mode = mode
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
+
+    def _safe_inside(self, parent_path, child_path):
+        try:
+            parent = os.path.normcase(os.path.abspath(os.path.normpath(parent_path)))
+            child = os.path.normcase(os.path.abspath(os.path.normpath(child_path)))
+            return os.path.commonpath([parent, child]) == parent
+        except (OSError, ValueError):
+            return False
+
+    def _calculate_sha256(self, path):
+        sha256 = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1048576), b""):
+                if not self._is_running:
+                    return ""
+                sha256.update(chunk)
+        return sha256.hexdigest().upper()
+
+    def _cache_score(self, cache_dir):
+        if not os.path.isdir(cache_dir):
+            return 0
+
+        score = 0
+        try:
+            root_files = os.listdir(cache_dir)
+        except OSError:
+            return 0
+
+        if any(name.lower().endswith(".md") for name in root_files):
+            score += 5
+
+        preview_dir = os.path.join(cache_dir, "preview")
+        if os.path.isdir(preview_dir):
+            try:
+                if any(os.path.isfile(os.path.join(preview_dir, name)) for name in os.listdir(preview_dir)):
+                    score += 4
+            except OSError:
+                pass
+
+        embedded_dir = os.path.join(cache_dir, "embedded")
+        if os.path.isdir(embedded_dir):
+            score += 1
+
+        for name in root_files:
+            if not name.lower().endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(cache_dir, name), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                meaningful_keys = set(data.keys()) - {"sha256", "mtime_check"}
+                if meaningful_keys:
+                    score += 2
+                    break
+            except Exception:
+                continue
+
+        return score
+
+    def _read_json_hash(self, json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            value = data.get("sha256")
+            if isinstance(value, str) and value:
+                return value.upper(), data
+        except Exception:
+            pass
+        return "", {}
+
+    def _find_cache_by_hash(self, file_hash, target_cache_dir):
+        search_root = os.path.join(self.cache_root, self.mode)
+        if not os.path.isdir(search_root):
+            search_root = self.cache_root
+
+        best = None
+        best_score = 0
+        best_mtime = 0
+        best_json_data = {}
+        best_json_name = ""
+
+        for root, dirs, files in os.walk(search_root):
+            if not self._is_running:
+                return None
+
+            dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git")]
+
+            if os.path.normcase(os.path.abspath(root)) == os.path.normcase(os.path.abspath(target_cache_dir)):
+                continue
+
+            for name in files:
+                if not name.lower().endswith(".json"):
+                    continue
+
+                json_path = os.path.join(root, name)
+                found_hash, data = self._read_json_hash(json_path)
+                if found_hash != file_hash:
+                    continue
+
+                score = self._cache_score(root)
+                if score <= 0:
+                    continue
+
+                try:
+                    mtime = os.path.getmtime(root)
+                except OSError:
+                    mtime = 0
+
+                if score > best_score or (score == best_score and mtime > best_mtime):
+                    best = root
+                    best_score = score
+                    best_mtime = mtime
+                    best_json_data = data
+                    best_json_name = name
+
+        if not best:
+            return None
+
+        return {
+            "cache_dir": best,
+            "json_data": best_json_data,
+            "json_name": best_json_name,
+            "score": best_score,
+        }
+
+    def _normalize_cache_files(self, cache_dir, model_path, json_data):
+        model_name = os.path.splitext(os.path.basename(model_path))[0]
+        model_mtime = os.path.getmtime(model_path)
+
+        json_data = dict(json_data or {})
+        json_data["sha256"] = json_data.get("sha256", "").upper()
+        json_data["mtime_check"] = model_mtime
+
+        json_path = os.path.join(cache_dir, model_name + ".json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(json_data, f, indent=4, ensure_ascii=False)
+
+        md_target = os.path.join(cache_dir, model_name + ".md")
+        if not os.path.exists(md_target):
+            md_candidates = [
+                os.path.join(cache_dir, name)
+                for name in os.listdir(cache_dir)
+                if name.lower().endswith(".md") and os.path.isfile(os.path.join(cache_dir, name))
+            ]
+            if md_candidates:
+                shutil.move(md_candidates[0], md_target)
+
+        for name in list(os.listdir(cache_dir)):
+            path = os.path.join(cache_dir, name)
+            if not os.path.isfile(path):
+                continue
+            if name.lower().endswith(".json") and name != os.path.basename(json_path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    def _relocate_cache(self, source_dir, target_dir, model_path, json_data):
+        if not self._safe_inside(self.cache_root, source_dir):
+            raise RuntimeError("Matched cache is outside the configured cache root.")
+        if not self._safe_inside(self.cache_root, target_dir):
+            raise RuntimeError("Target cache is outside the configured cache root.")
+
+        if os.path.exists(target_dir):
+            if self._cache_score(target_dir) > 0:
+                raise RuntimeError("Target cache already has metadata.")
+            shutil.rmtree(target_dir)
+
+        os.makedirs(os.path.dirname(target_dir), exist_ok=True)
+        shutil.copytree(source_dir, target_dir)
+        self._normalize_cache_files(target_dir, model_path, json_data)
+        shutil.rmtree(source_dir)
+
+    def run(self):
+        summary = {"matched": 0, "skipped": 0, "not_found": 0, "errors": []}
+        total = len(self.targets)
+
+        for idx, model_path in enumerate(self.targets):
+            if not self._is_running:
+                break
+
+            try:
+                if not model_path or not os.path.isfile(model_path):
+                    summary["skipped"] += 1
+                    continue
+
+                target_cache_dir = calculate_structure_path(model_path, self.cache_root, self.directories, mode=self.mode)
+                if self._cache_score(target_cache_dir) > 0:
+                    self.progress.emit(model_path, "Skipped (Cache exists)", 100)
+                    summary["skipped"] += 1
+                    continue
+
+                self.progress.emit(model_path, "Hashing", 10)
+                file_hash = self._calculate_sha256(model_path)
+                if not self._is_running:
+                    break
+                if not file_hash:
+                    summary["errors"].append(f"{os.path.basename(model_path)}: failed to calculate hash")
+                    self.progress.emit(model_path, "Error", 0)
+                    continue
+
+                self.progress.emit(model_path, "Searching cache", 50)
+                match = self._find_cache_by_hash(file_hash, target_cache_dir)
+                if not self._is_running:
+                    break
+                if not match:
+                    self.progress.emit(model_path, "No match", 100)
+                    summary["not_found"] += 1
+                    continue
+
+                json_data = match["json_data"]
+                json_data["sha256"] = file_hash
+                self.progress.emit(model_path, "Moving cache", 80)
+                self._relocate_cache(match["cache_dir"], target_cache_dir, model_path, json_data)
+                self.progress.emit(model_path, "Matched", 100)
+                summary["matched"] += 1
+
+            except Exception as e:
+                logging.error(f"[CacheMatchWorker] Failed for {model_path}: {e}")
+                summary["errors"].append(f"{os.path.basename(model_path)}: {e}")
+                self.progress.emit(model_path, "Error", 0)
+
+            if total:
+                logging.debug(f"[CacheMatchWorker] Progress {idx + 1}/{total}")
+
+        self.completed.emit(summary)
 
 # ==========================================
 # Model Download Worker (Restored)

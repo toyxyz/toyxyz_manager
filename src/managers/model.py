@@ -23,7 +23,7 @@ from ..ui_components import (
     FileCollisionDialog, OverwriteConfirmDialog, ZoomWindow
 )
 from .example import ExampleTabWidget
-from ..workers import ImageLoader
+from ..workers import CacheMatchWorker, ImageLoader
 from .download import DownloadController
 from ..controllers.metadata_controller import MetadataController
 from ..utils.comfy_node_builder import ComfyNodeBuilder
@@ -84,6 +84,15 @@ class ModelManagerWidget(BaseManagerWidget):
         
         # Stop Base workers
         super().stop_all_workers()
+
+    def collect_active_workers(self):
+        workers, thumb_workers, heavy_workers = super().collect_active_workers()
+        try:
+            if hasattr(self, 'cache_match_worker') and self.cache_match_worker and self.cache_match_worker.isRunning():
+                heavy_workers.append(self.cache_match_worker)
+        except RuntimeError:
+            pass
+        return workers, thumb_workers, heavy_workers
 
     def get_mode(self): return "model"
 
@@ -157,14 +166,18 @@ class ModelManagerWidget(BaseManagerWidget):
         btn_manual.setToolTip("Manually enter a Civitai/HuggingFace URL to fetch metadata")
         btn_download = QPushButton("⬇️ Download Model")
         btn_download.setToolTip("Download a new model from a URL")
+        btn_cache_match = QPushButton("Cache match")
+        btn_cache_match.setToolTip("Find and attach an existing cache folder with the same model hash")
         
         btn_auto.clicked.connect(lambda: self.run_civitai("auto"))
         btn_manual.clicked.connect(lambda: self.run_civitai("manual"))
         btn_download.clicked.connect(self.download_model_dialog)
+        btn_cache_match.clicked.connect(self.cache_match_selected_models)
 
         meta_btns.addWidget(btn_auto, 0, 0)
         meta_btns.addWidget(btn_manual, 0, 1)
         meta_btns.addWidget(btn_download, 1, 0)
+        meta_btns.addWidget(btn_cache_match, 1, 1)
         self.right_layout.addLayout(meta_btns)
         
         
@@ -441,6 +454,55 @@ class ModelManagerWidget(BaseManagerWidget):
         QMessageBox.critical(self, "Download Failed", err_msg)
         self.downl_controller.resume()
 
+    def cache_match_selected_models(self):
+        targets = list(self.selected_model_paths)
+        if not targets and self.current_path and os.path.isfile(self.current_path):
+            targets = [self.current_path]
+
+        if not targets:
+            QMessageBox.warning(self, "Warning", "No model selected.")
+            return
+
+        if hasattr(self, 'cache_match_worker') and self.cache_match_worker:
+            try:
+                if self.cache_match_worker.isRunning():
+                    QMessageBox.information(self, "Cache Match", "Cache match is already running.")
+                    return
+            except RuntimeError:
+                self.cache_match_worker = None
+
+        self.task_monitor.add_tasks(targets, task_type="Cache Match")
+        self.cache_match_worker = CacheMatchWorker(
+            targets=targets,
+            cache_root=self.get_cache_dir(),
+            directories=self.directories,
+            mode=self.get_mode()
+        )
+        self.cache_match_worker.progress.connect(self._on_cache_match_progress)
+        self.cache_match_worker.completed.connect(self._on_cache_match_completed)
+        self.cache_match_worker.finished.connect(self.cache_match_worker.deleteLater)
+        self.cache_match_worker.finished.connect(lambda: setattr(self, "cache_match_worker", None))
+        self.cache_match_worker.start()
+        self.show_status_message(f"Cache match started for {len(targets)} model(s).")
+
+    def _on_cache_match_progress(self, path, status, percent):
+        self.task_monitor.update_task(path, status, percent)
+        self.show_status_message(f"Cache Match: {os.path.basename(path)} - {status}", 0)
+
+    def _on_cache_match_completed(self, summary):
+        matched = summary.get("matched", 0)
+        skipped = summary.get("skipped", 0)
+        not_found = summary.get("not_found", 0)
+        errors = summary.get("errors", [])
+
+        if self.current_path and os.path.exists(self.current_path):
+            QTimer.singleShot(0, lambda p=self.current_path: self._load_details(p))
+
+        msg = f"Cache Match done. Matched: {matched}, Skipped: {skipped}, Not found: {not_found}"
+        if errors:
+            QMessageBox.warning(self, "Cache Match Completed with Errors", msg + "\n\n" + "\n".join(errors[:10]))
+        self.show_status_message(msg, 5000)
+
 
 
 
@@ -592,7 +654,7 @@ class ModelManagerWidget(BaseManagerWidget):
         target_dir = os.path.normpath(target_dir)
 
         # Ensure target is inside root
-        if os.path.commonpath([root_path, target_dir]) != root_path:
+        if not self._is_path_within(root_path, target_dir):
             QMessageBox.critical(self, "Error", "Cannot move files outside the selected root directory.")
             return
 

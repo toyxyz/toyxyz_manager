@@ -701,7 +701,7 @@ class TaskMonitorWidget(QWidget):
     def update_status_color(self, row, status):
         status_lower = status.lower()
         color = QColor("#eee")
-        if any(x in status_lower for x in ["done", "processed", "cached", "complete"]):
+        if any(x in status_lower for x in ["done", "processed", "cached", "complete", "matched"]):
             color = QColor("#4CAF50") 
         elif "skipped" in status_lower:
             color = QColor("#FFC107") 
@@ -722,7 +722,7 @@ class TaskMonitorWidget(QWidget):
             if not item: continue
             
             status = item.text().lower()
-            if any(s in status for s in ["done", "processed", "skipped", "error", "cached", "complete", "not found", "fail"]):
+            if any(s in status for s in ["done", "processed", "skipped", "error", "cached", "complete", "matched", "no match", "not found", "fail"]):
                 self.table.removeRow(r)
         
         self.row_map = {}
